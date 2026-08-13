@@ -1,0 +1,9 @@
+# compiled launch caches / local binaries
+donut
+donut_latin
+donut_latin_no_colour
+*.o
+*.out
+__pycache__/
+*.pyc
+.DS_Store
