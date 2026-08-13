@@ -321,6 +321,14 @@ int main(int argc, char **argv) {
 
     if (argc >= 2 && strcmp(argv[1], "--ppm") == 0) {
         int W = 280, H = 140;
+        {
+            const char *ew = getenv("DONUT_W");
+            const char *eh = getenv("DONUT_H");
+            if (ew && atoi(ew) >= 16)
+                W = atoi(ew);
+            if (eh && atoi(eh) >= 16)
+                H = atoi(eh);
+        }
         if (argc >= 4) {
             A0 = strtof(argv[2], NULL);
             B0 = strtof(argv[3], NULL);
