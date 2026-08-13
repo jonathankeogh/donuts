@@ -87,8 +87,8 @@ static inline float hash31(float x, float y, float z) {
 }
 
 static float gA, gB, gT, gCA, gSA, gCB, gSB;
-static int gSprSeed;
-static vec3 gSun;
+static float gMy, gCm, gSm, gPulse;
+static vec3 gSun, gL2, gGlowCol;
 
 static inline vec3 to_object(vec3 p) {
     /* Inverse of classic donut pose Rx(A)*Rz(B): Rz(-B) then Rx(-A). */
@@ -104,17 +104,24 @@ static inline float sd_torus_xz(vec3 p, float R, float r) {
     return sqrtf(qx * qx + p.y * p.y) - r;
 }
 
-static float map_scene(vec3 p, int *id) {
-    vec3 o = to_object(p);
-
-    float pr = sqrtf(o.x * o.x + o.z * o.z);
-    float phi = atan2f(o.z, o.x);
-    float theta = atan2f(o.y, pr - RMAJOR);
+static float map_pastry(vec3 o, int *id, int want_spr) {
     float dH = sd_torus_xz(o, RMAJOR, RMINOR);
+    *id = MAT_HERO;
+    float d = dH;
 
-    float dS = 1e5f;
-    int seed = 0;
-    {
+    float my2 = (o.y - gMy) * gCm - o.z * gSm;
+    float mz2 = (o.y - gMy) * gSm + o.z * gCm;
+    float dM = sd_torus_xz(v3(o.x, my2, mz2), 0.20f, 0.072f);
+    if (dM < d) {
+        d = dM;
+        *id = MAT_MOON;
+    }
+
+    /* Sprinkles sit on the glaze; skip the atan2 work unless we are close. */
+    if (want_spr && dH < 0.09f) {
+        float pr = sqrtf(o.x * o.x + o.z * o.z);
+        float phi = atan2f(o.z, o.x);
+        float theta = atan2f(o.y, pr - RMAJOR);
         const float su = (float)(2.0 * M_PI / 16.0);
         const float sv = (float)(2.0 * M_PI / 9.0);
         float iu = floorf(phi / su + 0.5f);
@@ -129,30 +136,25 @@ static float map_scene(vec3 p, int *id) {
             float cz = (RMAJOR + RMINOR * cv) * suu;
             float rr = 0.042f + 0.018f * h;
             float dx = o.x - cx, dy = o.y - cy, dz = o.z - cz;
-            dS = sqrtf(dx * dx + dy * dy + dz * dz) - rr;
-            seed = (int)(h * 97.f) + (int)iu * 3 + (int)iv * 17;
+            float dS = sqrtf(dx * dx + dy * dy + dz * dz) - rr;
+            if (dS < d) {
+                d = dS;
+                *id = MAT_SPR;
+            }
         }
     }
-
-    float my = 1.48f * sinf(gT * 0.95f);
-    vec3 m = v3(o.x, o.y - my, o.z);
-    float cm = cosf(gT * 2.35f), sm = sinf(gT * 2.35f);
-    float my2 = m.y * cm - m.z * sm;
-    float mz2 = m.y * sm + m.z * cm;
-    float dM = sd_torus_xz(v3(m.x, my2, mz2), 0.20f, 0.072f);
-
-    float d = dH;
-    *id = MAT_HERO;
-    if (dS < d) {
-        d = dS;
-        *id = MAT_SPR;
-        gSprSeed = seed;
-    }
-    if (dM < d) {
-        d = dM;
-        *id = MAT_MOON;
-    }
     return d;
+}
+
+static float map_scene(vec3 p, int *id) {
+    vec3 o = to_object(p);
+    float ol2 = o.x * o.x + o.y * o.y + o.z * o.z;
+    const float br = 1.82f;
+    if (ol2 > (br + 0.12f) * (br + 0.12f)) {
+        *id = MAT_HERO;
+        return sqrtf(ol2) - br;
+    }
+    return map_pastry(o, id, 1);
 }
 
 static float map_d(vec3 p) {
@@ -160,17 +162,27 @@ static float map_d(vec3 p) {
     return map_scene(p, &id);
 }
 
+/* Shadows do not need sprinkle bumps. */
+static float map_shadow(vec3 p) {
+    int id;
+    vec3 o = to_object(p);
+    return map_pastry(o, &id, 0);
+}
+
 static vec3 nrm_scene(vec3 p) {
     const float e = 0.0014f;
-    return vnorm(v3(map_d(v3(p.x + e, p.y, p.z)) - map_d(v3(p.x - e, p.y, p.z)),
-                    map_d(v3(p.x, p.y + e, p.z)) - map_d(v3(p.x, p.y - e, p.z)),
-                    map_d(v3(p.x, p.y, p.z + e)) - map_d(v3(p.x, p.y, p.z - e))));
+    vec3 a = v3(e, -e, -e);
+    vec3 b = v3(-e, -e, e);
+    vec3 c = v3(-e, e, -e);
+    vec3 d = v3(e, e, e);
+    return vnorm(vadd(vadd(vmul(a, map_d(vadd(p, a))), vmul(b, map_d(vadd(p, b)))),
+                      vadd(vmul(c, map_d(vadd(p, c))), vmul(d, map_d(vadd(p, d))))));
 }
 
 static float softshadow(vec3 ro, vec3 rd) {
     float t = 0.03f, res = 1.f;
-    for (int i = 0; i < 12; i++) {
-        float d = map_d(vadd(ro, vmul(rd, t)));
+    for (int i = 0; i < 10; i++) {
+        float d = map_shadow(vadd(ro, vmul(rd, t)));
         if (d < 0.001f)
             return 0.12f;
         res = fminf(res, 10.f * d / t);
@@ -220,7 +232,7 @@ static vec3 shade_mat(vec3 pos, vec3 rd, int id, int do_refl) {
     float rim = powf(1.f - ndv, 3.0f);
 
     vec3 l1 = gSun;
-    vec3 l2 = vnorm(v3(-0.55f, 0.25f, 0.70f));
+    vec3 l2 = gL2;
     float d1 = saturate(vdot(n, l1));
     float d2 = saturate(vdot(n, l2));
     vec3 h = vnorm(vadd(l1, v));
@@ -252,8 +264,18 @@ static vec3 shade_mat(vec3 pos, vec3 rd, int id, int do_refl) {
             col = vadd(col, vmul(env, 0.18f + 0.55f * fres));
         }
     } else if (id == MAT_SPR) {
-        float h = hash21((float)(gSprSeed % 13), (float)(gSprSeed / 13));
-        float h2 = hash21((float)gSprSeed, 3.7f);
+        vec3 so = to_object(pos);
+        float spr = sqrtf(so.x * so.x + so.z * so.z);
+        float sphi = atan2f(so.z, so.x);
+        float sth = atan2f(so.y, spr - RMAJOR);
+        const float su = (float)(2.0 * M_PI / 16.0);
+        const float sv = (float)(2.0 * M_PI / 9.0);
+        float iu = floorf(sphi / su + 0.5f);
+        float iv = floorf(sth / sv + 0.5f);
+        float hh = hash21(iu + 19.f, iv + 7.f);
+        int seed = (int)(hh * 97.f) + (int)iu * 3 + (int)iv * 17;
+        float h = hash21((float)(seed % 13), (float)(seed / 13));
+        float h2 = hash21((float)seed, 3.7f);
         if (h < 0.22f)
             albedo = v3(0.95f, 0.18f, 0.28f);
         else if (h < 0.42f)
@@ -304,10 +326,11 @@ static vec3 shade_mat(vec3 pos, vec3 rd, int id, int do_refl) {
             /* cheap object bounce: march the reflection a short way */
             float t = 0.04f;
             vec3 rcol = env;
-            for (int i = 0; i < 22; i++) {
+            for (int i = 0; i < 18; i++) {
                 vec3 q = vadd(pos, vmul(rdir, t));
                 int kid = 0;
-                float d = map_scene(q, &kid);
+                vec3 qo = to_object(q);
+                float d = map_pastry(qo, &kid, 0);
                 if (d < 0.002f) {
                     rcol = shade_mat(q, rdir, kid, 0);
                     break;
@@ -336,18 +359,21 @@ static vec3 march_color(vec3 ro, vec3 rd) {
     vec3 hit_p = ro;
     float hit_t = 1e9f;
 
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 36; i++) {
         vec3 p = vadd(ro, vmul(rd, t));
         int id;
+        vec3 o = to_object(p);
         float d = map_scene(p, &id);
 
-        /* Wormhole core + accretion disk, in pastry space. */
-        vec3 o = to_object(p);
-        float hole = sqrtf(o.x * o.x + o.z * o.z);
-        float disk = expf(-18.f * fabsf(o.y)) * expf(-10.f * (hole - 0.42f) * (hole - 0.42f));
-        float beam = expf(-14.f * hole) * expf(-0.45f * o.y * o.y);
-        float pulse = 0.78f + 0.22f * sinf(gT * 4.6f + o.y * 8.f);
-        glow += (disk * 0.018f + beam * 0.008f) * pulse;
+        /* Glow only near the hole — skip the exp storm in empty space. */
+        float hx = o.x * o.x + o.z * o.z;
+        if (hx < 1.15f && o.y * o.y < 1.7f) {
+            float hole = sqrtf(hx);
+            float disk = expf(-18.f * fabsf(o.y)) * expf(-10.f * (hole - 0.42f) * (hole - 0.42f));
+            float beam = expf(-14.f * hole) * expf(-0.45f * o.y * o.y);
+            float pulse = 0.78f + 0.22f * sinf(gT * 4.6f + o.y * 8.f);
+            glow += (disk * 0.018f + beam * 0.008f) * pulse;
+        }
 
         if (d < 0.0015f && t < tPlane) {
             hit_id = id;
@@ -378,9 +404,7 @@ static vec3 march_color(vec3 ro, vec3 rd) {
     vec3 fogc = sky(vnorm(v3(rd.x, 0.0f, rd.z)));
     col = vmix(col, fogc, fog * 0.72f);
 
-    float ph = 0.55f + 0.45f * sinf(gT * 1.7f);
-    vec3 gcol = vmix(v3(1.00f, 0.45f, 0.85f), v3(1.00f, 0.82f, 0.35f), 0.5f + 0.5f * sinf(gT * 0.9f));
-    col = vadd(col, vmul(gcol, glow * (1.15f + 0.35f * ph)));
+    col = vadd(col, vmul(gGlowCol, glow * (1.15f + 0.35f * gPulse)));
 
     col.x = powf(saturate(col.x), 0.88f);
     col.y = powf(saturate(col.y), 0.88f);
@@ -543,6 +567,9 @@ static void render_fb(pix *fb, int W, int H) {
     cam_basis(&ro, &uu, &vv, &ww);
     gSun = vnorm(v3(0.72f, 0.42f + 0.06f * sinf(gT * 0.23f), 0.48f));
 
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
             fb[y * W + x] = sample_pixel(x, y, W, H, aspect, ro, uu, vv, ww, ssaa);
@@ -635,6 +662,12 @@ static void sync_angles(void) {
     gSA = sinf(gA);
     gCB = cosf(gB);
     gSB = sinf(gB);
+    gMy = 1.48f * sinf(gT * 0.95f);
+    gCm = cosf(gT * 2.35f);
+    gSm = sinf(gT * 2.35f);
+    gL2 = vnorm(v3(-0.55f, 0.25f, 0.70f));
+    gPulse = 0.55f + 0.45f * sinf(gT * 1.7f);
+    gGlowCol = vmix(v3(1.00f, 0.45f, 0.85f), v3(1.00f, 0.82f, 0.35f), 0.5f + 0.5f * sinf(gT * 0.9f));
 }
 
 int main(int argc, char **argv) {

@@ -19,11 +19,13 @@ def bin_path(src: bytes) -> str:
 
 
 def compile_torus(src: bytes, dest: str) -> None:
-    cmd = [
+    base = [
         "gcc",
         "-O3",
         "-ffast-math",
         "-fno-math-errno",
+        "-fno-trapping-math",
+        "-march=native",
         "-std=c11",
         "-o",
         dest,
@@ -32,7 +34,10 @@ def compile_torus(src: bytes, dest: str) -> None:
         "-",
         "-lm",
     ]
+    cmd = base[:-4] + ["-fopenmp"] + base[-4:]
     r = subprocess.run(cmd, input=src, capture_output=True)
+    if r.returncode != 0:
+        r = subprocess.run(base, input=src, capture_output=True)
     if r.returncode != 0:
         sys.stderr.write(r.stderr.decode("utf-8", "replace"))
         sys.stderr.write("gcc failed — install gcc and try again\n")
